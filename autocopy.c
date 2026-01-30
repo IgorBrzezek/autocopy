@@ -5,8 +5,8 @@
 #include <windows.h>
 
 #define APP_AUTHOR "Igor Brzezek"
-#define APP_VERSION "0.0.4"
-#define APP_DATE "29.01.2026"
+#define APP_VERSION "0.0.5"
+#define APP_DATE "30.01.2026"
 #define APP_GITHUB "https://github.com/IgorBrzezek/Auto-Copy"
 
 // Global hook handles
@@ -16,7 +16,7 @@ HHOOK hKeyHook;
 DWORD dwMyPID;
 
 // Configuration flags
-BOOL bShowText = TRUE;
+BOOL bShowText = FALSE;
 BOOL bTUI = FALSE;
 BOOL bRequireAlt = FALSE;
 BOOL bRequireCtrl = FALSE;
@@ -28,14 +28,20 @@ int nRequiredClicks = 1;
 int nTotalTexts = 0;
 long long nTotalChars = 0;
 char szStartTime[64] = {0};
-char szArgsInfo[256] = "Arguments: ";
+char szArgsInfo[256] = " Arguments: ";
 char szLogFile[MAX_PATH] = {0};
 
-// TUI Log Buffer
-#define MAX_LOG_LINES 100
-char *logBuffer[MAX_LOG_LINES] = {0};
-int logPos = 0;
-int logCount = 0;
+// TUI Log Buffer configuration
+int maxLines = 100;  // Default maximum lines in buffer (changeable with --maxline)
+int maxLineBuffer = 65536;  // Default maximum bytes per line (64KB, changeable with --maxlinebuffer)
+char **logBuffer = NULL;  // Dynamically allocated buffer
+int logPos = 0;  // Current position in buffer
+int logCount = 0;  // Visible count
+
+// Scrolling state for TUI
+int scrollOffset = 0;
+// Current selected position in TUI log
+int selectedIndex = -1;
 
 // Function to write text to a log file
 void WriteToLog(const char *text) {
@@ -68,7 +74,7 @@ void DrawTUIHeader() {
 
   int width = (int)csbi.dwSize.X;
   COORD coord = {
-      0, csbi.srWindow.Top}; // Keep at the very top of the visible window
+      0, 0};
 
   // Save current attributes
   WORD oldAttrs = csbi.wAttributes;
@@ -79,27 +85,27 @@ void DrawTUIHeader() {
                                         FOREGROUND_RED | FOREGROUND_GREEN |
                                         FOREGROUND_BLUE | FOREGROUND_INTENSITY);
   char line1[512];
-  snprintf(line1, sizeof(line1), " %s v%s | Started: %s (CTRL-Z to stop)",
+  snprintf(line1, sizeof(line1), " %s v%s | Started: %s (CTRL-Z to stop, CTRL-ENTER to copy)",
            "autocopy", APP_VERSION, szStartTime);
-  printf("%-*s", width, line1);
+  printf("%-*.*s", width, width, line1);
 
   // Line 2: Green Info Bar (Arguments)
-  coord.Y = csbi.srWindow.Top + 1;
+  coord.Y = 1;
   SetConsoleCursorPosition(hConsole, coord);
   SetConsoleTextAttribute(hConsole, BACKGROUND_GREEN | FOREGROUND_RED |
                                         FOREGROUND_GREEN | FOREGROUND_BLUE |
                                         FOREGROUND_INTENSITY);
-  printf("%-*s", width, szArgsInfo);
+  printf("%-*.*s", width, width, szArgsInfo);
 
   // Line 3: Green Stats Bar (Count, Total Chars, Avg)
-  coord.Y = csbi.srWindow.Top + 2;
+  coord.Y = 2;
   SetConsoleCursorPosition(hConsole, coord);
   double avg = (nTotalTexts > 0) ? (double)nTotalChars / nTotalTexts : 0.0;
   char line3[512];
   snprintf(line3, sizeof(line3),
            " Copied: %d | Total Chars: %I64d | Avg Len: %.2f", nTotalTexts,
            nTotalChars, avg);
-  printf("%-*s", width, line3);
+  printf("%-*.*s", width, width, line3);
 
   // Reset color
   SetConsoleTextAttribute(hConsole, oldAttrs);
@@ -108,6 +114,56 @@ void DrawTUIHeader() {
   GetConsoleCursorInfo(hConsole, &cursorInfo);
   cursorInfo.bVisible = FALSE;
   SetConsoleCursorInfo(hConsole, &cursorInfo);
+}
+
+// Function to redraw the log area with scrolling support
+void RedrawLogArea() {
+  DrawTUIHeader();
+  HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+  CONSOLE_SCREEN_BUFFER_INFO csbi;
+  if (!GetConsoleScreenBufferInfo(hConsole, &csbi))
+    return;
+
+  int windowHeight = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+  int logAreaTop = 3;
+  int logAreaHeight = windowHeight - logAreaTop;
+
+  if (logAreaHeight <= 0)
+    return;
+
+  int width = (int)csbi.dwSize.X;
+
+  int maxScroll = logPos - logAreaHeight;
+  if (maxScroll < 0)
+    maxScroll = 0;
+  if (scrollOffset > maxScroll)
+    scrollOffset = maxScroll;
+
+  int startIdx = logPos - logAreaHeight - scrollOffset;
+  if (startIdx < 0)
+    startIdx = 0;
+
+  for (int i = 0; i < logAreaHeight; i++) {
+    COORD coord = {0, (SHORT)(logAreaTop + i)};
+    SetConsoleCursorPosition(hConsole, coord);
+
+    int logIdx = startIdx + i;
+    if (logIdx >= 0 && logIdx < logPos && logBuffer[logIdx] != NULL) {
+      char logLine[1024];
+      snprintf(logLine, sizeof(logLine), "[%d]: %s", logIdx + 1, logBuffer[logIdx]);
+
+       // Check if this is the selected item and apply white highlight bar
+       if (logIdx == selectedIndex) {
+         // White background with black text
+         SetConsoleTextAttribute(hConsole, BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE | BACKGROUND_INTENSITY);
+       }
+       printf("%-*.*s", width, width, logLine);
+       // Reset to default colors
+       SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
+    } else {
+      printf("%*s", width, "");
+    }
+  }
 }
 
 // Function to add a message to the TUI log and handle scrolling
@@ -124,37 +180,44 @@ void AddLogMessage(const char *text) {
   if (logAreaHeight <= 0)
     return;
 
-  // If we've reached the bottom of the visible area, scroll it up
-  if (logCount >= logAreaHeight) {
-    SMALL_RECT scrollRect;
-    scrollRect.Left = 0;
-    scrollRect.Top = csbi.srWindow.Top + logAreaTop + 1;
-    scrollRect.Right = csbi.dwSize.X - 1;
-    scrollRect.Bottom = csbi.srWindow.Bottom;
+   // Store text in buffer, respecting maxLineBuffer size limit
+   char *textToStore = (char *)text;
+   char truncatedText[65536] = {0};  // Local buffer for truncation
+   
+   // Truncate text if it exceeds maxLineBuffer
+   if ((int)strlen(text) > maxLineBuffer) {
+     strncpy(truncatedText, text, maxLineBuffer - 1);
+     truncatedText[maxLineBuffer - 1] = '\0';
+     textToStore = truncatedText;
+   }
+   
+   if (logPos < maxLines) {
+     logBuffer[logPos] = strdup(textToStore);
+   } else {
+     // Buffer is full, remove oldest and shift
+     free(logBuffer[0]);
+     for (int i = 0; i < maxLines - 1; i++) {
+       logBuffer[i] = logBuffer[i + 1];
+     }
+     logBuffer[maxLines - 1] = strdup(textToStore);
+   }
+   logPos++;
 
-    COORD destOrigin = {0, (SHORT)(csbi.srWindow.Top + logAreaTop)};
+   // Reset scroll offset when new message arrives
+   scrollOffset = 0;
 
-    CHAR_INFO fill;
-    fill.Char.UnicodeChar = L' ';
-    fill.Attributes = csbi.wAttributes;
+   // Auto-select the first (most recent) item if nothing is selected
+   if (selectedIndex < 0) {
+     selectedIndex = logPos - 1;
+   }
 
-    ScrollConsoleScreenBuffer(hConsole, &scrollRect, NULL, destOrigin, &fill);
-    SetConsoleCursorPosition(hConsole, (COORD){0, (SHORT)csbi.srWindow.Bottom});
-  } else {
-    SetConsoleCursorPosition(
-        hConsole,
-        (COORD){0, (SHORT)(csbi.srWindow.Top + logAreaTop + logCount)});
-  }
+   // Update visible count
+   logCount++;
+   if (logCount > logAreaHeight)
+     logCount = logAreaHeight;
 
-  // Truncate text and pad to clear the line
-  int width = (int)csbi.dwSize.X - 1;
-  char logLine[1024];
-  snprintf(logLine, sizeof(logLine), "[%d]: %s", nTotalTexts, text);
-  printf("%-*.*s", width, width, logLine);
-
-  logCount++;
-  if (logCount > logAreaHeight)
-    logCount = logAreaHeight;
+   // Redraw the entire log area
+   RedrawLogArea();
 }
 
 // Function to print current clipboard text content
@@ -173,7 +236,6 @@ void PrintClipboardText() {
       if (bTUI) {
         nTotalTexts++;
         nTotalChars += (long long)strlen(pszText);
-        DrawTUIHeader();
         AddLogMessage(pszText);
       } else if (bShowText) {
         printf("[Clipboard]: %s\n", pszText);
@@ -235,6 +297,12 @@ DWORD WINAPI CopyThread(LPVOID lpParam) {
     return 0;
   }
 
+  // Clear clipboard before copying to avoid mixing old and new content
+  if (OpenClipboard(NULL)) {
+    EmptyClipboard();
+    CloseClipboard();
+  }
+
   SendCtrlC();
 
   // Process clipboard if any output mode is enabled
@@ -292,10 +360,13 @@ LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 // Low-level keyboard hook procedure to catch CTRL+Z for exit (only if active)
+// Also handles scrolling keys for TUI mode
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
   if (nCode == HC_ACTION) {
     if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
       KBDLLHOOKSTRUCT *pKbdStruct = (KBDLLHOOKSTRUCT *)lParam;
+      
+      // Handle CTRL+Z for exit
       if (pKbdStruct->vkCode == 'Z') {
         if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
           if (GetForegroundWindow() == GetConsoleWindow()) {
@@ -303,121 +374,253 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
           }
         }
       }
+      
+       // Handle TUI mode controls (scrolling, selection, copy)
+       if (bTUI && GetForegroundWindow() == GetConsoleWindow()) {
+         HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+         CONSOLE_SCREEN_BUFFER_INFO csbi;
+         if (GetConsoleScreenBufferInfo(hConsole, &csbi)) {
+           int windowHeight = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+           int logAreaTop = 3;
+           int logAreaHeight = windowHeight - logAreaTop;
+           
+           // Calculate max scroll offset
+           int maxScroll = (logPos > logAreaHeight) ? (logPos - logAreaHeight) : 0;
+           
+           // Handle Up arrow key - move selection up
+           if (pKbdStruct->vkCode == VK_UP) {
+             if (selectedIndex < 0) {
+               selectedIndex = logPos - 1; // Select last item if nothing selected
+             } else if (selectedIndex > 0) {
+               selectedIndex--;
+               // Auto-scroll if needed
+               int visibleTop = logPos - logAreaHeight - scrollOffset;
+               if (visibleTop < 0) visibleTop = 0;
+               if (selectedIndex < visibleTop && scrollOffset < maxScroll) {
+                 scrollOffset++;
+               }
+             }
+             RedrawLogArea();
+             return 0;
+           }
+           
+           // Handle Down arrow key - move selection down
+           if (pKbdStruct->vkCode == VK_DOWN) {
+             if (selectedIndex < 0) {
+               selectedIndex = 0; // Select first item if nothing selected
+             } else if (selectedIndex < logPos - 1) {
+               selectedIndex++;
+               // Auto-scroll if needed
+               int visibleBottom = logPos - scrollOffset - 1;
+               if (selectedIndex > visibleBottom && scrollOffset > 0) {
+                 scrollOffset--;
+               }
+             }
+             RedrawLogArea();
+             return 0;
+           }
+           
+           // Handle CTRL+ENTER to copy selected item to clipboard
+           if (pKbdStruct->vkCode == VK_RETURN) {
+             if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
+               if (selectedIndex >= 0 && selectedIndex < logPos && logBuffer[selectedIndex] != NULL) {
+                 // Clear clipboard and copy selected text
+                 if (OpenClipboard(NULL)) {
+                   EmptyClipboard();
+                   
+                   size_t textLen = strlen(logBuffer[selectedIndex]);
+                   HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, textLen + 1);
+                   if (hMem) {
+                     char *pMem = (char *)GlobalLock(hMem);
+                     if (pMem) {
+                       strcpy(pMem, logBuffer[selectedIndex]);
+                       GlobalUnlock(hMem);
+                       SetClipboardData(CF_TEXT, hMem);
+                     }
+                   }
+                   CloseClipboard();
+                 }
+               }
+               return 0;
+             }
+           }
+         }
+       }
     }
   }
   return CallNextHookEx(hKeyHook, nCode, wParam, lParam);
 }
 
-void ShowHelp(const char *progName) {
-  printf("autocopy v%s\n", APP_VERSION);
-  printf("Author: %s\n", APP_AUTHOR);
-  printf("Date: %s\n", APP_DATE);
-  printf(
-      "Exit: CTRL+Z (captured only when window is active) or close window\n\n");
-  printf("Usage: %s [options]\n", progName);
-  printf("Options:\n");
-  printf("  -h, --help        Show this help message\n");
-  printf("  --version         Show version information\n");
-  printf("  --showtext        Show the text copied to clipboard (on by "
-         "default)\n");
-  printf("  --1click          Copy after 1 click (default)\n");
-  printf("  --2click          Copy after 2 clicks (double click)\n");
-  printf("  --3click          Copy after 3 clicks (triple click)\n");
-  printf("  --alt             Only copy if Left Alt is held down\n");
-  printf("  --ctrl            Only copy if Left Control is held down\n");
-  printf("  --ctrl1           Always allow single-click + Ctrl to copy\n");
-  printf("  --ctrl2           Always allow double-click + Ctrl to copy\n");
-  printf("  --tui             Enable Terminal User Interface mode\n");
-  printf("  --log <file>      Log all copied text to specified file\n");
-  printf("  --mintime <ms>    Minimum time between clicks (default: 0ms)\n");
-  printf("  --maxtime <ms>    Maximum time between clicks (default: system "
-         "double-click time)\n");
+// Short help - program info and options in one line
+void ShowShortHelp(const char *progName) {
+   printf("autocopy v%s | Author: %s | Date: %s | Usage: %s [--tui|--showtext] [--1click|--2click|--3click] [--alt|--ctrl] [--ctrl1] [--ctrl2] [--mintime MS] [--maxtime MS] [--maxline N] [--maxlinebuffer M] [--log FILE] [--help] [--version] [--force]\n",
+           APP_VERSION, APP_AUTHOR, APP_DATE, progName);
+}
+
+// Detailed help - organized by category
+void ShowDetailedHelp(const char *progName) {
+   printf("autocopy v%s\n", APP_VERSION);
+   printf("Author: %s\n", APP_AUTHOR);
+   printf("Date: %s\n", APP_DATE);
+   printf("Exit: CTRL+Z (captured only when window is active) or close window\n\n");
+   printf("\nUsage: %s [options]\n\n", progName);
+   
+   // Display modes section
+   printf("DISPLAY MODES:\n");
+   printf("  --tui                Enable Terminal User Interface mode (key u/d or arrows up/dn to move active line)\n");
+   printf("  --showtext           Show copied text in console output\n\n");
+   
+   // Click triggering section
+   printf("CLICK TRIGGERING:\n");
+   printf("  --1click             Trigger on single click (default)\n");
+   printf("  --2click             Trigger on double click\n");
+   printf("  --3click             Trigger on triple click\n\n");
+   
+   // Modifier keys section
+   printf("MODIFIER KEYS:\n");
+   printf("  --alt                Require Left Alt to be held down\n");
+   printf("  --ctrl               Require Left Control to be held down\n");
+   printf("  --ctrl1              Always allow single-click + Ctrl to copy\n");
+   printf("  --ctrl2              Always allow double-click + Ctrl to copy\n\n");
+   
+   // Timing section
+   printf("TIMING:\n");
+   printf("  --mintime <ms>       Minimum time between clicks (default: 0ms)\n");
+   printf("  --maxtime <ms>       Maximum time between clicks (default: system double-click time)\n\n");
+   
+   // Buffer management section
+   printf("BUFFER MANAGEMENT:\n");
+   printf("  --maxline <N>        Maximum lines in buffer (default: 100)\n");
+   printf("  --maxlinebuffer <M>  Maximum bytes per line (default: 65536 = 64KB)\n\n");
+   
+   // File and logging section
+   printf("FILE AND LOGGING:\n");
+   printf("  --log <file>         Log all copied text to specified file\n\n");
+   
+   // Help and info section
+   printf("HELP AND INFORMATION:\n");
+   printf("  -h                   Show short help (program info only)\n");
+   printf("  --help               Show this detailed help with all options\n");
+   printf("  --version            Show version information\n");
 }
 
 int main(int argc, char *argv[]) {
-  // Ensure only one instance is running
-  // Using a unique name without "Global\" to avoid permission issues
-  HANDLE hMutex = CreateMutex(NULL, FALSE, "AutoCopy2_Instance_Mutex_Igor");
-  DWORD dwLastError = GetLastError();
+   // Check for --force option to ignore mutex check
+   BOOL bForce = FALSE;
+   for (int i = 1; i < argc; i++) {
+     if (strcmp(argv[i], "--force") == 0) {
+       bForce = TRUE;
+       break;
+     }
+   }
 
-  if (hMutex == NULL) {
-    fprintf(stderr, "Error: Could not create instance mutex (error %lu).\n",
-            dwLastError);
-    Sleep(2000);
-    return 1;
-  }
+   // Ensure only one instance is running
+   // Using a unique name without "Global\" to avoid permission issues
+   HANDLE hMutex = CreateMutex(NULL, FALSE, "AutoCopy2_Instance_Mutex_Igor");
+   DWORD dwLastError = GetLastError();
 
-  if (dwLastError == ERROR_ALREADY_EXISTS) {
-    fprintf(stderr,
-            "Error: Another instance of Auto-Copy is already running!\n");
-    CloseHandle(hMutex);
-    Sleep(2000); // Give user time to see the error
-    return 1;
-  }
+   if (hMutex == NULL) {
+     fprintf(stderr, "Error: Could not create instance mutex (error %lu).\n",
+             dwLastError);
+     Sleep(2000);
+     return 1;
+   }
 
-  // Initialize default max time
-  dwMaxTime = GetDoubleClickTime();
+   if (dwLastError == ERROR_ALREADY_EXISTS && !bForce) {
+     fprintf(stderr,
+             "Error: Another instance of Auto-Copy is already running!\n");
+     CloseHandle(hMutex);
+     Sleep(2000); // Give user time to see the error
+     return 1;
+   }
 
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-      ShowHelp(argv[0]);
-      return 0;
-    } else if (strcmp(argv[i], "--version") == 0) {
-      printf("autocopy version %s\n", APP_VERSION);
-      printf("Author: %s\n", APP_AUTHOR);
-      return 0;
-    } else if (strcmp(argv[i], "--showtext") == 0) {
-      bShowText = TRUE;
-    } else if (strcmp(argv[i], "--1click") == 0) {
-      nRequiredClicks = 1;
-    } else if (strcmp(argv[i], "--2click") == 0) {
-      nRequiredClicks = 2;
-    } else if (strcmp(argv[i], "--3click") == 0) {
-      nRequiredClicks = 3;
-    } else if (strcmp(argv[i], "--alt") == 0) {
-      bRequireAlt = TRUE;
-      bRequireCtrl = FALSE;
-    } else if (strcmp(argv[i], "--ctrl") == 0) {
-      bRequireCtrl = TRUE;
-      bRequireAlt = FALSE;
-    } else if (strcmp(argv[i], "--ctrl1") == 0) {
-      bCtrl1 = TRUE;
-    } else if (strcmp(argv[i], "--ctrl2") == 0) {
-      bCtrl2 = TRUE;
-    } else if (strcmp(argv[i], "--tui") == 0) {
-      bTUI = TRUE;
-    } else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
-      strncpy(szLogFile, argv[++i], MAX_PATH - 1);
-    } else if (strcmp(argv[i], "--mintime") == 0 && i + 1 < argc) {
-      dwMinTime = (DWORD)strtoul(argv[++i], NULL, 10);
-    } else if (strcmp(argv[i], "--maxtime") == 0 && i + 1 < argc) {
-      dwMaxTime = (DWORD)strtoul(argv[++i], NULL, 10);
-    } else {
-      printf("Unknown option: %s\n", argv[i]);
-      ShowHelp(argv[0]);
-      return 1;
+   // Initialize default max time
+   dwMaxTime = GetDoubleClickTime();
+
+    for (int i = 1; i < argc; i++) {
+      if (strcmp(argv[i], "-h") == 0) {
+        ShowShortHelp(argv[0]);
+        return 0;
+      } else if (strcmp(argv[i], "--help") == 0) {
+        ShowDetailedHelp(argv[0]);
+        return 0;
+      } else if (strcmp(argv[i], "--version") == 0) {
+        printf("autocopy version %s\n", APP_VERSION);
+        printf("Author: %s\n", APP_AUTHOR);
+        return 0;
+      } else if (strcmp(argv[i], "--showtext") == 0) {
+        bShowText = TRUE;
+      } else if (strcmp(argv[i], "--1click") == 0) {
+        nRequiredClicks = 1;
+      } else if (strcmp(argv[i], "--2click") == 0) {
+        nRequiredClicks = 2;
+      } else if (strcmp(argv[i], "--3click") == 0) {
+        nRequiredClicks = 3;
+      } else if (strcmp(argv[i], "--alt") == 0) {
+        bRequireAlt = TRUE;
+        bRequireCtrl = FALSE;
+      } else if (strcmp(argv[i], "--ctrl") == 0) {
+        bRequireCtrl = TRUE;
+        bRequireAlt = FALSE;
+      } else if (strcmp(argv[i], "--ctrl1") == 0) {
+        bCtrl1 = TRUE;
+      } else if (strcmp(argv[i], "--ctrl2") == 0) {
+        bCtrl2 = TRUE;
+      } else if (strcmp(argv[i], "--tui") == 0) {
+        bTUI = TRUE;
+      } else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
+        strncpy(szLogFile, argv[++i], MAX_PATH - 1);
+      } else if (strcmp(argv[i], "--mintime") == 0 && i + 1 < argc) {
+        dwMinTime = (DWORD)strtoul(argv[++i], NULL, 10);
+      } else if (strcmp(argv[i], "--maxtime") == 0 && i + 1 < argc) {
+        dwMaxTime = (DWORD)strtoul(argv[++i], NULL, 10);
+      } else if (strcmp(argv[i], "--maxline") == 0 && i + 1 < argc) {
+        maxLines = atoi(argv[++i]);
+        if (maxLines < 10) maxLines = 10;  // Enforce minimum of 10 lines
+        if (maxLines > 100000) maxLines = 100000;  // Enforce maximum of 100k lines
+      } else if (strcmp(argv[i], "--maxlinebuffer") == 0 && i + 1 < argc) {
+        maxLineBuffer = atoi(argv[++i]);
+        if (maxLineBuffer < 256) maxLineBuffer = 256;  // Enforce minimum of 256 bytes
+        if (maxLineBuffer > 1048576) maxLineBuffer = 1048576;  // Enforce maximum of 1MB
+      } else if (strcmp(argv[i], "--force") == 0) {
+        // --force option already handled at the beginning
+        // Silently ignore it here
+      } else {
+        printf("Unknown option: %s\n", argv[i]);
+        ShowShortHelp(argv[0]);
+        return 1;
+      }
     }
-  }
 
-  // Get our own PID for window detection safety
-  dwMyPID = GetCurrentProcessId();
+   // Allocate log buffer with dynamic size
+   logBuffer = (char **)malloc(maxLines * sizeof(char *));
+   if (logBuffer == NULL) {
+     fprintf(stderr, "Error: Failed to allocate log buffer memory.\n");
+     Sleep(2000);
+     return 1;
+   }
+   memset(logBuffer, 0, maxLines * sizeof(char *));
 
-  // Register control handler to prevent closing on Ctrl+C
-  if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
-    printf("Warning: Could not set control handler.\n");
-  }
+   // Get our own PID for window detection safety
+   dwMyPID = GetCurrentProcessId();
 
-  printf("autocopy started.\n");
-  printf("Settings: %d click(s)%s%s\n", nRequiredClicks,
-         bRequireAlt ? " + Left Alt" : "", bRequireCtrl ? " + Left Ctrl" : "");
-  printf("Timing: Min %lu ms, Max %lu ms\n", dwMinTime, dwMaxTime);
-  printf("Select text with mouse in OTHER windows to copy automatically "
-         "(Ctrl+C).\n");
-  printf("Clicking this window is safe.\n");
-  printf("Close this window to exit.\n");
-  if (bShowText) {
-    printf("Clipboard monitoring enabled (--showtext).\n");
-  }
+   // Register control handler to prevent closing on Ctrl+C
+   if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
+     printf("Warning: Could not set control handler.\n");
+   }
+
+   printf("autocopy started.\n");
+   printf("Settings: %d click(s)%s%s\n", nRequiredClicks,
+          bRequireAlt ? " + Left Alt" : "", bRequireCtrl ? " + Left Ctrl" : "");
+   printf("Timing: Min %lu ms, Max %lu ms\n", dwMinTime, dwMaxTime);
+   printf("Buffer: Max %d lines, %d bytes per line\n", maxLines, maxLineBuffer);
+   printf("Select text with mouse in OTHER windows to copy automatically "
+          "(Ctrl+C).\n");
+   printf("Clicking this window is safe.\n");
+   printf("Close this window to exit. (CTRL-Z)\n");
+   if (bShowText) {
+     printf("Clipboard monitoring enabled (--showtext).\n");
+   }
 
   if (bTUI) {
     // Collect args info
@@ -456,16 +659,26 @@ int main(int argc, char *argv[]) {
     DispatchMessage(&msg);
   }
 
-  UnhookWindowsHookEx(hMouseHook);
-  UnhookWindowsHookEx(hKeyHook);
+   UnhookWindowsHookEx(hMouseHook);
+   UnhookWindowsHookEx(hKeyHook);
 
-  // Restore cursor visibility
-  HANDLE hStdout = GetStdHandle(STD_OUTPUT_HANDLE);
-  CONSOLE_CURSOR_INFO cursorInfo;
-  GetConsoleCursorInfo(hStdout, &cursorInfo);
-  cursorInfo.bVisible = TRUE;
-  SetConsoleCursorInfo(hStdout, &cursorInfo);
+   // Clean up log buffer memory
+   if (logBuffer != NULL) {
+     for (int i = 0; i < logPos; i++) {
+       if (logBuffer[i] != NULL) {
+         free(logBuffer[i]);
+       }
+     }
+     free(logBuffer);
+   }
 
-  CloseHandle(hMutex);
-  return 0;
+   // Restore cursor visibility
+   HANDLE hStdout = GetStdHandle(STD_OUTPUT_HANDLE);
+   CONSOLE_CURSOR_INFO cursorInfo;
+   GetConsoleCursorInfo(hStdout, &cursorInfo);
+   cursorInfo.bVisible = TRUE;
+   SetConsoleCursorInfo(hStdout, &cursorInfo);
+
+   CloseHandle(hMutex);
+   return 0;
 }

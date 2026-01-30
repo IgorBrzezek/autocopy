@@ -1,6 +1,6 @@
 # autocopy v0.0.5
 
-
+<<<<<<< HEAD
 **autocopy** is a lightweight Windows utility designed to streamline your workflow by automatically copying selected text to the clipboard. It eliminates the need for manual `Ctrl+C` by detecting when you finish highlighting text with your mouse.
 =======
 [![Author](https://img.shields.io/badge/Author-Igor%20Brzezek-blue.svg)](https://github.com/IgorBrzezek)
