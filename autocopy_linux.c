@@ -114,7 +114,7 @@ void DrawTUIHeader() {
   printf("\033[1;1H");
   printf("\033[44m\033[97m");
   char line1[512];
-  snprintf(line1, sizeof(line1), " autocopy v%s | Started: %s (CTRL-C to stop)",
+  snprintf(line1, sizeof(line1), " autocopy v%s | Started: %s (CTRL-C to stop, CTRL-ENTER to copy)",
            APP_VERSION, szStartTime);
   printf("%-*s", terminalWidth, line1);
   printf("\033[0m");
