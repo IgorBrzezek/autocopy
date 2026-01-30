@@ -1,13 +1,7 @@
 # autocopy v0.0.5
 
 
-**autocopy** is a lightweight Windows utility designed to streamline your workflow by automatically copying selected text to the clipboard. It eliminates the need for manual `Ctrl+C` by detecting when you finish highlighting text with your mouse.
-=======
-[![Author](https://img.shields.io/badge/Author-Igor%20Brzezek-blue.svg)](https://github.com/IgorBrzezek)
-[![Date](https://img.shields.io/badge/Date-30.01.2026-green.svg)](https://github.com/IgorBrzezek/Auto-Copy)
-[![GitHub](https://img.shields.io/badge/GitHub-IgorBrzezek/Auto-Copy-blue.svg)](https://github.com/IgorBrzezek/Auto-Copy)
-[![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](#)
-
+## Purpose
 **autocopy** is a lightweight Windows utility designed to streamline your workflow by automatically copying selected text to the clipboard. It eliminates the need for manual `Ctrl+C` by detecting when you finish highlighting text with your mouse and simulating the copy command automatically.
 >>>>>>> 0be2e62 (autocopy WIN+LIN v0.0.5)
 
