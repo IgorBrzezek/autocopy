@@ -34,11 +34,23 @@ Run the program from your terminal with various options:
 -   `--tui`: Enable Terminal User Interface mode.
     -   In TUI mode, use arrow keys to navigate logs.
     -   Press `Ctrl+Enter` to copy the currently selected log line to the system clipboard.
-    -   `u`/`U`: Scroll up.
-    -   `d`/`D`: Scroll down.
+        -   The selected text will be copied and ready to paste elsewhere.
+        -   Useful for quickly retrieving previously copied text from the log.
+    -   Press `Ctrl+Shift+Enter` to copy all log entries from the current TUI session to the clipboard.
+    -   `u`/`U`: Scroll up one page.
+    -   `d`/`D`: Scroll down one page.
+    -   `Home`: Jump to the first log entry.
+    -   `End`: Jump to the last log entry.
+    -   `q`: Quit TUI mode and return to normal operation.
+    -   `Ctrl+C`: Exit the entire program.
 -   `--log <file>`: Log all copied text to the specified file.
 -   `--logbuffer N`: Maximum number of log lines to keep in memory in TUI mode (default: 200).
+    -   When the buffer is full, oldest entries are automatically removed (FIFO).
+    -   Higher values use more memory but preserve more history.
+    -   Set to 0 for unlimited buffer (memory permitting).
 -   `--linesize M`: Maximum size of text (in characters) to store per log line (default: 4096).
+    -   Text exceeding this limit will be truncated.
+    -   Useful for preventing memory issues with very long selections.
 -   `--mintime <ms>`: Minimum time in milliseconds between clicks to be considered part of a multi-click sequence (default: 0ms).
 -   `--maxtime <ms>`: Maximum time in milliseconds between clicks to be considered part of a multi-click sequence (default: 500ms).
 -   `-b`, `--batch`: Run in batch mode (no output to console, useful for background operation).
@@ -78,22 +90,27 @@ Make sure you have the necessary development packages installed. On Debian/Ubunt
 
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential libx11-dev libxtst-dev libxfixes-dev libxrecord-dev
+sudo apt-get install build-essential libx11-dev libxtst-dev libxfixes-dev libxrecord-dev libxcb-dev libxau-dev libxdmcp-dev
 ```
 On Fedora/RHEL-based systems:
 ```bash
-sudo dnf install gcc make libX11-devel libXtst-devel libXfixes-devel libXrandr-devel libXext-devel
+sudo dnf install gcc make libX11-devel libXtst-devel libXfixes-devel libXrandr-devel libXext-devel libxcb-devel libXau-devel libXdmcp-devel
 ```
-*(Note: `libXrandr-devel` and `libXext-devel` might be needed for some distributions if `libxrecord-dev` or `libxfixes-dev` have dependencies on them.)*
 
 ### Compiling:
 Navigate to the directory containing `autocopy_linux.c` and run the following command:
 
+#### Dynamic Linking (recommended for most systems):
 ```bash
 gcc autocopy_linux.c -o autocopy_linux -lX11 -lXtst -lXfixes -lpthread
 ```
+This will create a small executable (~38KB) that requires X11 libraries to be installed on the target system.
 
-This will create an executable named `autocopy_linux` in your current directory.
+#### Static Linking (for systems without X11 libraries):
+```bash
+gcc -static autocopy_linux.c -o autocopy_linux -Wl,--start-group -lX11 -lXtst -lXfixes -lXext -lxcb -lXau -lXdmcp -lpthread -ldl -lrt -lresolv -Wl,--end-group
+```
+This will create a larger executable (~2.7MB) that contains all required libraries and can run on any Linux system with X11 server, even without development libraries installed.
 
 ### Running:
 After compilation, you can run the program:
@@ -103,6 +120,3 @@ After compilation, you can run the program:
 ```
 
 To exit the program, press `Ctrl+C` in the terminal where it's running.
-
-## Note on Static Compilation
-Attempting to compile this X11 application statically (`gcc -static ...`) is generally not recommended or easily achievable. X11 client libraries (`libX11`, `libXtst`, etc.) often have dynamic dependencies on other system libraries (like XCB and parts of GLIBC) that are difficult to bundle into a single, truly static executable that works universally across different Linux distributions without prior installation of those underlying dynamic dependencies. The provided compilation instructions use dynamic linking, which is the standard and recommended approach for X11 applications.
