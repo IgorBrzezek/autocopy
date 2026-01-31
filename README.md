@@ -55,6 +55,11 @@ autocopy.exe --tui --log clipboard.txt
 
 # Show help
 autocopy.exe -h
+
+# Most useful
+The most useful option is:
+ autocopy.exe --2click --tui --showtext
+because it "catches" double and triple clicks.
 ```
 
 ### Complete Option Reference
